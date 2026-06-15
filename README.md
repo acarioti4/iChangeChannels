@@ -6,7 +6,12 @@ voice channel.
 
 The bot handles Discord API work directly and uses desktop automation only for
 the actions Discord does not expose to bot accounts: making the logged-in
-`mr.veeseeksbox` desktop account open a voice-channel link and start Go Live.
+streaming desktop account open a voice-channel link and start Go Live.
+
+Throughout this document "the stream account" means the dedicated Discord
+account, logged in on the streaming PC's desktop client, that joins voice and
+goes live with VLC. You configure which account that is through `STREAM_USER_ID`
+(and an optional display name in `STREAM_USERNAME`).
 
 ## Current Behavior
 
@@ -21,9 +26,9 @@ the actions Discord does not expose to bot accounts: making the logged-in
 - Controls Android TV over WiFi using the Android TV Remote Protocol v2.
 - Records the Power On requester, guild, voice channel, join URL, and timestamp in `data/state.json`.
 - Enforces one active stream location at a time:
-  - `mr.veeseeksbox` cannot be moved to another guild or channel while already in voice.
+  - The stream account cannot be moved to another guild or channel while already in voice.
   - Power Off must be run from the active server.
-  - If `mr.veeseeksbox` is alone in voice, Power Off can disconnect it immediately from any server.
+  - If the stream account is alone in voice, Power Off can disconnect it immediately from any server.
   - Remote key presses are blocked from other servers while the stream account is active elsewhere.
 - Shows live logs in a Tkinter app window and writes rotating logs to `LOG_FILE`.
 
@@ -33,17 +38,17 @@ Power On means all of these are true:
 
 - Android TV reports powered on.
 - VLC is running locally.
-- `mr.veeseeksbox` is in the selected voice channel.
-- Discord reports `mr.veeseeksbox` as Go Live streaming.
+- The stream account is in the selected voice channel.
+- Discord reports the stream account as Go Live streaming.
 
 Power On only fixes missing pieces. For example, if VLC is already running and
 the stream account is already in the correct channel and streaming, the bot does
 not restart VLC or move the stream account.
 
-Power Off disconnects `mr.veeseeksbox` from voice through the Discord API. It
+Power Off disconnects the stream account from voice through the Discord API. It
 does not close VLC and does not power off the Android TV.
 
-If the last viewer leaves and `mr.veeseeksbox` is the only account left in the
+If the last viewer leaves and the stream account is the only account left in the
 voice channel, the bot automatically disconnects the stream account and releases
 the remote lock immediately, even if the previous user's 5-minute idle timer has
 not expired.
@@ -77,7 +82,8 @@ accepts network remote commands in standby.
 4. Create `.env` from `.env.example` if it does not already exist, then fill in:
    - `DISCORD_BOT_TOKEN`
    - `STREAM_USER_ID`
-   - `ANDROID_TV_HOST` or run the pairing helper and let it update the host
+   - `ANDROID_TV_HOST` (or leave it blank and let the pairing helper in step 5
+     autopopulate it)
    - VLC settings for the dedicated server
 
 5. Pair the Android TV:
@@ -103,12 +109,13 @@ Core `.env` values:
 ```env
 DISCORD_BOT_TOKEN=
 STREAM_USER_ID=
-STREAM_USERNAME=mr.veeseeksbox
+STREAM_USERNAME=the stream account
 DISCORD_DM_SEARCH=iChangeChannels
 SYNC_COMMANDS_TO_GUILD_ID=
 COMMAND_SYNC_ON_START=true
 
-ANDROID_TV_HOST=192.168.1.50
+# Leave blank to let scripts\pair_android_tv.py discover and fill it in.
+ANDROID_TV_HOST=
 ANDROID_TV_CERTFILE=data/androidtv_cert.pem
 ANDROID_TV_KEYFILE=data/androidtv_key.pem
 ANDROID_TV_CLIENT_NAME=iChangeChannels
@@ -183,9 +190,9 @@ the bot and helper scripts with matching permissions.
    - the requester's current voice channel, if they are in one;
    - otherwise, the first public voice or stage channel the stream account can join.
 7. The bot saves the requester and channel details.
-8. The bot checks whether `mr.veeseeksbox` is already in another voice channel.
+8. The bot checks whether the stream account is already in another voice channel.
 9. The bot ensures Android TV is on and VLC is open.
-10. The bot DMs `mr.veeseeksbox` a link in this format:
+10. The bot DMs the stream account a link in this format:
 
    ```text
    https://discord.com/channels/GUILD_ID/CHANNEL_ID

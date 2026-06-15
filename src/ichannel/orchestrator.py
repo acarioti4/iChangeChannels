@@ -241,7 +241,7 @@ class PowerCoordinator:
             if current_location and current_location.channel.id != target_channel.id:
                 return PowerResult(
                     False,
-                    "mr.veeseeksbox is already active in "
+                    f"{self.config.stream_username} is already active in "
                     f"{current_location.guild.name} / {current_location.channel.name}. "
                     "Power Off there before summoning it anywhere else.",
                     {"stream_account_locked": True},
@@ -311,7 +311,11 @@ class PowerCoordinator:
             location = self.find_stream_location()
             if location is None:
                 self.state.clear_active()
-                return PowerResult(True, "Powered Off. mr.veeseeksbox was not in voice.", {})
+                return PowerResult(
+                    True,
+                    f"Powered Off. {self.config.stream_username} was not in voice.",
+                    {},
+                )
 
             stream_account_alone = self._stream_account_is_alone(location)
             if (
@@ -321,7 +325,7 @@ class PowerCoordinator:
             ):
                 return PowerResult(
                     False,
-                    "mr.veeseeksbox is active in "
+                    f"{self.config.stream_username} is active in "
                     f"{location.guild.name} / {location.channel.name}. "
                     "Power Off must be run from the active server.",
                     {"stream_account_disconnected": False},
@@ -358,7 +362,7 @@ class PowerCoordinator:
             except discord.Forbidden:
                 return PowerResult(
                     False,
-                    "I do not have permission to disconnect mr.veeseeksbox.",
+                    f"I do not have permission to disconnect {self.config.stream_username}.",
                     {"stream_account_disconnected": False},
                 )
             except discord.HTTPException as exc:
@@ -557,7 +561,7 @@ class PowerCoordinator:
             result = await self._disconnect_stream_account(
                 location,
                 reason="iChangeChannels Auto Power Off: stream account alone",
-                message="Powered Off because mr.veeseeksbox was alone in voice.",
+                message=f"Powered Off because {self.config.stream_username} was alone in voice.",
             )
             if not result.ok:
                 self.logger.warning("Auto Power Off failed: %s", result.message)
@@ -645,7 +649,8 @@ class PowerCoordinator:
                 self.logger.error("Could not DM stream account; Discord returned Forbidden")
                 return PowerResult(
                     False,
-                    "I could not DM mr.veeseeksbox. Check DM privacy settings and shared servers.",
+                    f"I could not DM {self.config.stream_username}. "
+                    "Check DM privacy settings and shared servers.",
                     {
                         "stream_account_in_channel": in_channel,
                         "stream_active": streaming,
@@ -687,7 +692,7 @@ class PowerCoordinator:
         if not in_channel:
             return PowerResult(
                 False,
-                "Timed out waiting for mr.veeseeksbox to join the target voice channel.",
+                f"Timed out waiting for {self.config.stream_username} to join the target voice channel.",
                 {"stream_account_in_channel": False, "stream_active": False},
             )
 
@@ -720,7 +725,8 @@ class PowerCoordinator:
         if not streaming:
             return PowerResult(
                 False,
-                "Timed out waiting for Discord to report that mr.veeseeksbox is streaming.",
+                "Timed out waiting for Discord to report that "
+                f"{self.config.stream_username} is streaming.",
                 {"stream_account_in_channel": True, "stream_active": False},
             )
 

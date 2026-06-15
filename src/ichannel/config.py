@@ -67,7 +67,7 @@ def load_config(env_file: Path | str = ".env") -> AppConfig:
     return AppConfig(
         discord_token=_require(merged, "DISCORD_BOT_TOKEN"),
         stream_user_id=stream_user_id,
-        stream_username=_get(merged, "STREAM_USERNAME", "mr.veeseeksbox"),
+        stream_username=_get(merged, "STREAM_USERNAME", "the stream account"),
         discord_dm_search=_get(merged, "DISCORD_DM_SEARCH", "iChangeChannels"),
         android_tv_host=_require(merged, "ANDROID_TV_HOST"),
         android_tv_certfile=certfile,

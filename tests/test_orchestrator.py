@@ -54,7 +54,7 @@ def make_config(state_file: Path) -> AppConfig:
     return AppConfig(
         discord_token="token",
         stream_user_id=STREAM_USER_ID,
-        stream_username="mr.veeseeksbox",
+        stream_username="stream-account",
         discord_dm_search="iChangeChannels",
         android_tv_host="192.0.2.10",
         android_tv_certfile=state_file.parent / "cert.pem",
@@ -91,7 +91,7 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_power_off_allows_other_server_when_stream_account_is_alone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            stream_member = FakeMember(STREAM_USER_ID, "mr.veeseeksbox")
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
             channel = FakeChannel(100, "Movies", [stream_member])
             active_guild = FakeGuild(200, "Active Guild", [channel])
             other_guild = FakeGuild(300, "Other Guild", [])
@@ -112,7 +112,7 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_power_off_blocks_other_server_when_stream_account_is_not_alone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            stream_member = FakeMember(STREAM_USER_ID, "mr.veeseeksbox")
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
             viewer = FakeMember(99, "viewer")
             channel = FakeChannel(100, "Movies", [stream_member, viewer])
             active_guild = FakeGuild(200, "Active Guild", [channel])
@@ -131,7 +131,7 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_voice_update_disconnects_stream_account_when_last_viewer_leaves(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            stream_member = FakeMember(STREAM_USER_ID, "mr.veeseeksbox")
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
             viewer = FakeMember(99, "viewer")
             channel = FakeChannel(100, "Movies", [stream_member])
             guild = FakeGuild(200, "Active Guild", [channel])
@@ -158,7 +158,7 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            stream_member = FakeMember(STREAM_USER_ID, "mr.veeseeksbox")
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
             channel = FakeChannel(100, "Movies", [stream_member])
             guild = FakeGuild(200, "Active Guild", [channel])
             coordinator = self.build_coordinator([guild], Path(temp_dir) / "state.json")
