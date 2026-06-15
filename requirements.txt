@@ -1,0 +1,7 @@
+androidtvremote2>=0.2.0
+discord.py>=2.5.0
+psutil>=5.9.8
+pyautogui>=0.9.54
+pyperclip>=1.8.2
+pywinauto>=0.6.8
+zeroconf>=0.131.0
