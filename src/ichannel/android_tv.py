@@ -118,6 +118,24 @@ class AndroidTVController:
 
         raise AndroidTVError("Android TV did not report powered on before timeout")
 
+    async def ensure_off(self) -> bool:
+        await self.connect()
+        if not bool(getattr(self._remote, "is_on", False)):
+            self.logger.info("Android TV is already off")
+            return True
+
+        self.logger.info("Android TV is on; sending POWER")
+        await self._send_key_command("POWER")
+
+        deadline = asyncio.get_running_loop().time() + self.power_timeout_seconds
+        while asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.5)
+            if not bool(getattr(self._remote, "is_on", False)):
+                self.logger.info("Android TV reported off")
+                return True
+
+        raise AndroidTVError("Android TV did not report powered off before timeout")
+
     async def send_key(self, key: str) -> None:
         self.logger.info("Android TV key: %s", key)
         await self._send_key_command(key)

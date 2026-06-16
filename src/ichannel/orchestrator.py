@@ -311,11 +311,12 @@ class PowerCoordinator:
             location = self.find_stream_location()
             if location is None:
                 self.state.clear_active()
-                return PowerResult(
-                    True,
-                    f"Powered Off. {self.config.stream_username} was not in voice.",
-                    {},
-                )
+                checks: dict[str, bool] = {}
+                tv_error = await self._power_off_android_tv(checks)
+                message = f"Powered Off. {self.config.stream_username} was not in voice."
+                if tv_error:
+                    message += f" Android TV power-off failed: {tv_error}"
+                return PowerResult(True, message, checks)
 
             stream_account_alone = self._stream_account_is_alone(location)
             if (
@@ -342,13 +343,37 @@ class PowerCoordinator:
             result = await self._disconnect_stream_account(
                 location,
                 reason="iChangeChannels Power Off",
-                message="Powered Off. VLC and Android TV were left alone.",
+                message="Powered Off. Disconnected the stream account and powered off the Android TV.",
             )
-            if result.ok and stream_account_alone:
+            if not result.ok:
+                return result
+
+            tv_error = await self._power_off_android_tv(result.checks)
+            if tv_error:
+                result.message = (
+                    f"Disconnected {self.config.stream_username}, but the Android TV "
+                    f"power-off failed: {tv_error}"
+                )
+
+            if stream_account_alone:
                 self._release_remote_control_lock(
                     "Power Off disconnected stream account while it was alone"
                 )
             return result
+
+    async def _power_off_android_tv(self, checks: dict[str, bool]) -> str | None:
+        try:
+            await self.tv.ensure_off()
+            checks["android_tv_off"] = True
+            return None
+        except AndroidTVPairingRequired as exc:
+            checks["android_tv_off"] = False
+            self.logger.error("Android TV pairing required during Power Off: %s", exc)
+            return str(exc)
+        except AndroidTVError as exc:
+            checks["android_tv_off"] = False
+            self.logger.error("Android TV power-off failed: %s", exc)
+            return str(exc)
 
     async def _disconnect_stream_account(
         self,
@@ -570,6 +595,10 @@ class PowerCoordinator:
             self._release_remote_control_lock(
                 "Auto Power Off disconnected stream account after last viewer left"
             )
+
+            tv_error = await self._power_off_android_tv(result.checks)
+            if tv_error:
+                self.logger.warning("Auto Power Off: Android TV power-off failed: %s", tv_error)
 
     def find_stream_location(self) -> StreamLocation | None:
         for guild in self.bot.guilds:

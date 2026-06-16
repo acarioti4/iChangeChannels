@@ -50,6 +50,15 @@ class FakeBot:
         self.guilds = guilds
 
 
+class FakeTV:
+    def __init__(self) -> None:
+        self.ensure_off_calls = 0
+
+    async def ensure_off(self) -> bool:
+        self.ensure_off_calls += 1
+        return True
+
+
 def make_config(state_file: Path) -> AppConfig:
     return AppConfig(
         discord_token="token",
@@ -87,7 +96,9 @@ def make_config(state_file: Path) -> AppConfig:
 
 class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
     def build_coordinator(self, guilds: list[FakeGuild], state_file: Path) -> PowerCoordinator:
-        return PowerCoordinator(FakeBot(guilds), make_config(state_file))  # type: ignore[arg-type]
+        coordinator = PowerCoordinator(FakeBot(guilds), make_config(state_file))  # type: ignore[arg-type]
+        coordinator.tv = FakeTV()  # type: ignore[assignment]
+        return coordinator
 
     async def test_power_off_allows_other_server_when_stream_account_is_alone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -102,13 +113,18 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             interaction = SimpleNamespace(user="requester", guild=other_guild)
 
             result = await coordinator.power_off(interaction)  # type: ignore[arg-type]
+            tv_off_calls = coordinator.tv.ensure_off_calls  # type: ignore[attr-defined]
 
         self.assertTrue(result.ok)
         self.assertEqual(
             stream_member.move_to_calls,
             [(None, "iChangeChannels Power Off")],
         )
-        self.assertEqual(result.checks, {"stream_account_disconnected": True})
+        self.assertEqual(
+            result.checks,
+            {"stream_account_disconnected": True, "android_tv_off": True},
+        )
+        self.assertEqual(tv_off_calls, 1)
 
     async def test_power_off_blocks_other_server_when_stream_account_is_not_alone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -147,12 +163,29 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
             await coordinator.note_stream_voice_update(viewer, before, after)  # type: ignore[arg-type]
             lock_reason = coordinator.claim_remote_ui(user_id=2, username="next", guild_id=200)
+            tv_off_calls = coordinator.tv.ensure_off_calls  # type: ignore[attr-defined]
 
         self.assertEqual(
             stream_member.move_to_calls,
             [(None, "iChangeChannels Auto Power Off: stream account alone")],
         )
         self.assertIsNone(lock_reason)
+        self.assertEqual(tv_off_calls, 1)
+
+    async def test_manual_stream_disconnect_does_not_power_off_tv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
+            channel = FakeChannel(100, "Movies", [])
+            guild = FakeGuild(200, "Active Guild", [channel])
+            coordinator = self.build_coordinator([guild], Path(temp_dir) / "state.json")
+            before = SimpleNamespace(channel=channel, self_stream=True)
+            after = SimpleNamespace(channel=None, self_stream=False)
+
+            await coordinator.note_stream_voice_update(stream_member, before, after)  # type: ignore[arg-type]
+            tv_off_calls = coordinator.tv.ensure_off_calls  # type: ignore[attr-defined]
+
+        self.assertEqual(stream_member.move_to_calls, [])
+        self.assertEqual(tv_off_calls, 0)
 
     async def test_voice_update_does_not_disconnect_when_stream_account_joins_empty_channel(
         self,

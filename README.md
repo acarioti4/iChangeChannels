@@ -45,13 +45,20 @@ Power On only fixes missing pieces. For example, if VLC is already running and
 the stream account is already in the correct channel and streaming, the bot does
 not restart VLC or move the stream account.
 
-Power Off disconnects the stream account from voice through the Discord API. It
-does not close VLC and does not power off the Android TV.
+Power Off disconnects the stream account from voice through the Discord API and
+then powers off the Android TV box (it sends POWER only if the TV reports as on).
+It does not close VLC. If the Android TV power-off fails, the stream account is
+still disconnected and the failure is reported in the result.
 
 If the last viewer leaves and the stream account is the only account left in the
-voice channel, the bot automatically disconnects the stream account and releases
-the remote lock immediately, even if the previous user's 5-minute idle timer has
-not expired.
+voice channel, the bot automatically disconnects the stream account, powers off
+the Android TV box, and releases the remote lock immediately, even if the
+previous user's 5-minute idle timer has not expired.
+
+The Android TV is powered off whenever the bot itself disconnects the stream
+account (Power Off or the automatic alone-in-voice disconnect). If the stream
+account is disconnected manually from Discord, the bot only clears its state and
+leaves the Android TV alone.
 
 ## Important Limits
 
