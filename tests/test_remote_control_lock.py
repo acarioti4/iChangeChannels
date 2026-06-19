@@ -53,6 +53,17 @@ class RemoteControlLockTests(unittest.TestCase):
         self.assertFalse(blocked.allowed)
         self.assertEqual(blocked.remaining_seconds, 199)
 
+    def test_remaining_seconds_reports_current_owner_lease(self) -> None:
+        clock = MutableClock()
+        lock = RemoteControlLock(timeout_seconds=300, clock=clock)
+
+        self.assertIsNone(lock.remaining_seconds(user_id=1))
+        self.assertTrue(lock.claim_or_refresh(user_id=1, username="alice", guild_id=10).allowed)
+        clock.advance(42)
+
+        self.assertEqual(lock.remaining_seconds(user_id=1), 258)
+        self.assertIsNone(lock.remaining_seconds(user_id=2))
+
     def test_previous_owner_can_reclaim_expired_lock(self) -> None:
         clock = MutableClock()
         lock = RemoteControlLock(timeout_seconds=300, clock=clock)

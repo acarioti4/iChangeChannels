@@ -31,7 +31,12 @@ class StateStore:
             raw = data.get("active_session")
             if not raw:
                 return None
-            return ActiveSession(**raw)
+            if not isinstance(raw, dict):
+                return None
+            try:
+                return ActiveSession(**raw)
+            except TypeError:
+                return None
 
     def set_active(self, session: ActiveSession) -> None:
         with self._lock:
@@ -49,9 +54,12 @@ class StateStore:
         if not self.path.exists():
             return {"active_session": None}
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {"active_session": None}
+        if not isinstance(data, dict):
+            return {"active_session": None}
+        return data
 
     def _write(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

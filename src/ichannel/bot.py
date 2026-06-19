@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 import discord
 from discord import app_commands
@@ -52,6 +54,9 @@ PANEL_NAMES = {
     "numpad": "Numpad",
 }
 
+REMOTE_COUNTDOWN_UPDATE_INTERVAL_SECONDS = 1.0
+REMOTE_UNLOCKED_MESSAGE = "Remote unlocked!"
+
 
 class RemoteButton(discord.ui.Button["RemoteView"]):
     def __init__(
@@ -72,14 +77,23 @@ class RemoteButton(discord.ui.Button["RemoteView"]):
 
 
 class RemoteView(discord.ui.View):
-    def __init__(self, coordinator: PowerCoordinator, owner_id: int, panel: str = "nav") -> None:
+    def __init__(
+        self,
+        coordinator: PowerCoordinator,
+        owner_id: int,
+        panel: str = "nav",
+        status: str | None = None,
+    ) -> None:
         super().__init__(timeout=15 * 60)
         self.coordinator = coordinator
         self.owner_id = owner_id
         self.panel = panel if panel in PANEL_NAMES else "nav"
+        self.status = status
+        self._countdown_task: asyncio.Task[None] | None = None
 
         self.add_item(RemoteButton("Power On", "power_on", row=0, style=discord.ButtonStyle.success))
         self.add_item(RemoteButton("Power Off", "power_off", row=0, style=discord.ButtonStyle.danger))
+        self.add_item(RemoteButton("Refresh", "refresh_tv", row=0, style=discord.ButtonStyle.secondary))
         self.add_item(RemoteButton("Status", "status", row=0, style=discord.ButtonStyle.secondary))
 
         if self.panel == "nav":
@@ -90,6 +104,69 @@ class RemoteView(discord.ui.View):
             self._add_numpad_panel()
 
         self._add_tabs()
+
+    def content(self) -> str:
+        remaining_seconds = self.coordinator.remote_control_lease_remaining_seconds(
+            user_id=self.owner_id
+        )
+        return _remote_content(self.panel, self.status, remaining_seconds)
+
+    def bind_countdown_to_interaction(self, interaction: discord.Interaction) -> None:
+        self.start_countdown(
+            lambda content, view: interaction.edit_original_response(
+                content=content,
+                view=view,
+            )
+        )
+
+    def start_countdown(
+        self,
+        edit: Callable[[str, "RemoteView | None"], Awaitable[object]],
+        *,
+        interval_seconds: float = REMOTE_COUNTDOWN_UPDATE_INTERVAL_SECONDS,
+    ) -> None:
+        self.stop_countdown()
+        last_content = self.content()
+        self._countdown_task = asyncio.create_task(
+            self._run_countdown(edit, interval_seconds, last_content)
+        )
+
+    def stop_countdown(self) -> None:
+        task = self._countdown_task
+        self._countdown_task = None
+        if task is None or task.done():
+            return
+
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if task is not current_task:
+            task.cancel()
+
+    async def _run_countdown(
+        self,
+        edit: Callable[[str, "RemoteView | None"], Awaitable[object]],
+        interval_seconds: float,
+        last_content: str,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(interval_seconds)
+                if self.coordinator.remote_control_lease_remaining_seconds(
+                    user_id=self.owner_id
+                ) is None:
+                    await edit(REMOTE_UNLOCKED_MESSAGE, None)
+                    return
+                next_content = self.content()
+                if next_content != last_content:
+                    await edit(next_content, self)
+                    last_content = next_content
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            return
+
+    async def on_timeout(self) -> None:
+        self.stop_countdown()
 
     def _add_nav_panel(self) -> None:
         self.add_item(RemoteButton("Back", "back", row=1))
@@ -167,51 +244,103 @@ class RemoteView(discord.ui.View):
             guild_id=interaction.guild.id if interaction.guild else None,
         )
         if lock_reason:
-            await interaction.response.send_message(lock_reason, ephemeral=True)
+            await self._edit_remote_response(interaction, status=lock_reason)
             return
+
+        self.stop_countdown()
 
         if action.startswith("tab_"):
             panel = action.removeprefix("tab_")
-            view = RemoteView(self.coordinator, owner_id=self.owner_id, panel=panel)
+            view = RemoteView(
+                self.coordinator,
+                owner_id=self.owner_id,
+                panel=panel,
+                status=self.status,
+            )
             await interaction.response.edit_message(
-                content=f"iChangeChannels remote - {PANEL_NAMES[view.panel]}",
+                content=view.content(),
                 view=view,
             )
+            view.bind_countdown_to_interaction(interaction)
             return
 
         if action == "power_on":
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer()
             result = await self.coordinator.power_on(interaction)
-            await interaction.followup.send(_format_result(result), ephemeral=True)
+            await self._edit_deferred_remote(interaction, status=_format_result(result))
             return
 
         if action == "power_off":
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer()
             result = await self.coordinator.power_off(interaction)
-            await interaction.followup.send(_format_result(result), ephemeral=True)
+            await self._edit_deferred_remote(interaction, status=_format_result(result))
             return
 
         if action == "status":
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer()
             result = await self.coordinator.status()
-            await interaction.followup.send(result.message, ephemeral=True)
+            await self._edit_deferred_remote(interaction, status=result.message)
             return
 
         block_reason = self.coordinator.remote_control_block_reason(interaction.guild)
         if block_reason:
-            await interaction.response.send_message(block_reason, ephemeral=True)
+            await self._edit_remote_response(interaction, status=block_reason)
+            return
+
+        if action == "refresh_tv":
+            await interaction.response.defer()
+            result = await self.coordinator.refresh_tv_box(interaction)
+            await self._edit_deferred_remote(interaction, status=_format_result(result))
             return
 
         key = TV_KEYS[action]
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer()
         result = await self.coordinator.send_tv_key(
             action=action,
             key=key,
             user_id=interaction.user.id,
             guild_id=interaction.guild.id if interaction.guild else None,
         )
-        if not result.ok:
-            await interaction.followup.send(_format_result(result), ephemeral=True)
+        await self._edit_deferred_remote(
+            interaction,
+            status=_format_result(result, include_checks=False),
+        )
+
+    async def _edit_remote_response(
+        self,
+        interaction: discord.Interaction,
+        *,
+        status: str,
+    ) -> None:
+        view = RemoteView(
+            self.coordinator,
+            owner_id=self.owner_id,
+            panel=self.panel,
+            status=status,
+        )
+        await interaction.response.edit_message(
+            content=view.content(),
+            view=view,
+        )
+        view.bind_countdown_to_interaction(interaction)
+
+    async def _edit_deferred_remote(
+        self,
+        interaction: discord.Interaction,
+        *,
+        status: str,
+    ) -> None:
+        view = RemoteView(
+            self.coordinator,
+            owner_id=self.owner_id,
+            panel=self.panel,
+            status=status,
+        )
+        await interaction.edit_original_response(
+            content=view.content(),
+            view=view,
+        )
+        view.bind_countdown_to_interaction(interaction)
 
 
 class IChangeChannelsBot(commands.Bot):
@@ -239,21 +368,29 @@ class IChangeChannelsBot(commands.Bot):
         self.logger.info("Logged in as %s (%s)", self.user, self.user.id)
         if self.config.command_sync_on_start and not self._synced:
             try:
-                if self.config.sync_commands_to_guild_id:
-                    guild = discord.Object(id=self.config.sync_commands_to_guild_id)
-                    self.tree.copy_global_to(guild=guild)
-                    synced = await self.tree.sync(guild=guild)
-                    self.logger.info(
-                        "Synced %s slash command(s) to guild %s",
-                        len(synced),
-                        self.config.sync_commands_to_guild_id,
-                    )
-                else:
-                    synced = await self.tree.sync()
-                    self.logger.info("Synced %s global slash command(s)", len(synced))
+                await self._sync_global_commands_only()
                 self._synced = True
             except Exception:
                 self.logger.exception("Slash command sync failed")
+
+    async def _sync_global_commands_only(self) -> None:
+        global_synced = await self.tree.sync()
+        self.logger.info(
+            "Synced %s global slash command(s)",
+            len(global_synced),
+        )
+        await self._clear_stale_guild_commands()
+
+    async def _clear_stale_guild_commands(self) -> None:
+        for guild in self.guilds:
+            guild_object = discord.Object(id=guild.id)
+            self.tree.clear_commands(guild=guild_object)
+            synced = await self.tree.sync(guild=guild_object)
+            self.logger.info(
+                "Cleared stale slash commands from guild %s (%s remaining)",
+                guild.id,
+                len(synced),
+            )
 
     async def on_voice_state_update(
         self,
@@ -277,21 +414,23 @@ class IChangeChannelsBot(commands.Bot):
         )
         if lock_reason:
             await interaction.response.send_message(lock_reason, ephemeral=True)
+            _start_lockout_countdown(self.coordinator, interaction)
             return
 
         view = RemoteView(self.coordinator, owner_id=interaction.user.id)
         await interaction.response.send_message(
-            "iChangeChannels remote - Nav", view=view, ephemeral=True
+            view.content(), view=view, ephemeral=True
         )
+        view.bind_countdown_to_interaction(interaction)
 
 
 def build_bot(config: AppConfig) -> IChangeChannelsBot:
     return IChangeChannelsBot(config)
 
 
-def _format_result(result: PowerResult) -> str:
+def _format_result(result: PowerResult, *, include_checks: bool = True) -> str:
     prefix = "OK" if result.ok else "Needs attention"
-    if not result.checks:
+    if not include_checks or not result.checks:
         return f"{prefix}: {result.message}"
 
     lines = [f"{prefix}: {result.message}", ""]
@@ -299,3 +438,54 @@ def _format_result(result: PowerResult) -> str:
         label = key.replace("_", " ").title()
         lines.append(f"{label}: {'OK' if value else 'Missing'}")
     return "\n".join(lines)
+
+
+def _remote_content(panel: str, status: str | None, remaining_seconds: int | None) -> str:
+    lines = [f"iChangeChannels remote - {PANEL_NAMES[panel]}"]
+    if remaining_seconds is not None:
+        lines.append(f"Remote unlocks in {_format_countdown(remaining_seconds)}")
+    if status:
+        lines.extend(["", status])
+
+    content = "\n".join(lines)
+    if len(content) <= 2000:
+        return content
+
+    return content[:1997] + "..."
+
+
+def _format_countdown(seconds: int) -> str:
+    minutes, seconds = divmod(max(0, seconds), 60)
+    return f"{minutes:02}:{seconds:02}"
+
+
+def _start_lockout_countdown(
+    coordinator: PowerCoordinator,
+    interaction: discord.Interaction,
+    *,
+    interval_seconds: float = REMOTE_COUNTDOWN_UPDATE_INTERVAL_SECONDS,
+) -> None:
+    asyncio.create_task(
+        _run_lockout_countdown(coordinator, interaction, interval_seconds)
+    )
+
+
+async def _run_lockout_countdown(
+    coordinator: PowerCoordinator,
+    interaction: discord.Interaction,
+    interval_seconds: float,
+) -> None:
+    last_content = coordinator.remote_control_lockout_message() or REMOTE_UNLOCKED_MESSAGE
+    try:
+        while True:
+            await asyncio.sleep(interval_seconds)
+            next_content = coordinator.remote_control_lockout_message()
+            if next_content is None:
+                if last_content != REMOTE_UNLOCKED_MESSAGE:
+                    await interaction.edit_original_response(content=REMOTE_UNLOCKED_MESSAGE)
+                return
+            if next_content != last_content:
+                await interaction.edit_original_response(content=next_content)
+                last_content = next_content
+    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+        return

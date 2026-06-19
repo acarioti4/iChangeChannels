@@ -54,6 +54,46 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "VLC_ARGS"):
                     load_config(env_file)
 
+    def test_vlc_args_strip_grouping_quotes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, r'VLC_ARGS=--input "C:\Video Files\clip.mp4" --fullscreen')
+
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(env_file)
+
+        self.assertEqual(
+            config.vlc_args,
+            ["--input", r"C:\Video Files\clip.mp4", "--fullscreen"],
+        )
+
+    def test_rejects_negative_timeout_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, "ANDROID_TV_POWER_TIMEOUT_SECONDS=-1")
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(ConfigError, "ANDROID_TV_POWER_TIMEOUT_SECONDS"):
+                    load_config(env_file)
+
+    def test_rejects_non_finite_numeric_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, "REMOTE_KEY_RATE_PER_SECOND=nan")
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(ConfigError, "REMOTE_KEY_RATE_PER_SECOND"):
+                    load_config(env_file)
+
+    def test_rejects_non_positive_discord_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, "STREAM_USER_ID=0")
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(ConfigError, "STREAM_USER_ID"):
+                    load_config(env_file)
+
 
 if __name__ == "__main__":
     unittest.main()

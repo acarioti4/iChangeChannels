@@ -97,6 +97,24 @@ class RemoteControlLock:
     def _is_expired(self, lease: RemoteControlLease, now: float) -> bool:
         return now - lease.last_activity_at >= self.timeout_seconds
 
+    def remaining_seconds(self, *, user_id: int | None = None) -> int | None:
+        lease = self._lease
+        now = self._clock()
+        if lease is None or self._is_expired(lease, now):
+            return None
+        if user_id is not None and lease.user_id != user_id:
+            return None
+
+        remaining = self.timeout_seconds - (now - lease.last_activity_at)
+        return max(1, math.ceil(remaining))
+
+    def active_lease(self) -> RemoteControlLease | None:
+        lease = self._lease
+        now = self._clock()
+        if lease is None or self._is_expired(lease, now):
+            return None
+        return lease
+
     def release(self) -> None:
         self._lease = None
 
@@ -203,97 +221,97 @@ class PowerCoordinator:
             self._end_lifecycle_action("Power On")
 
     async def _power_on_locked(self, interaction: discord.Interaction) -> PowerResult:
-            if interaction.guild is None or not isinstance(interaction.user, discord.Member):
-                return PowerResult(False, "Run this from a server text channel.", {})
+        if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+            return PowerResult(False, "Run this from a server text channel.", {})
 
-            target_channel = await self._resolve_target_channel(interaction.guild, interaction.user)
-            if target_channel is None:
-                return PowerResult(
-                    False,
-                    "No usable voice channel was found. Join a voice channel and try again.",
-                    {},
-                )
-
-            requested_by = interaction.user
-            join_url = f"https://discord.com/channels/{interaction.guild.id}/{target_channel.id}"
-            session = ActiveSession(
-                requested_by_user_id=requested_by.id,
-                requested_by_username=str(requested_by),
-                guild_id=interaction.guild.id,
-                guild_name=interaction.guild.name,
-                channel_id=target_channel.id,
-                channel_name=target_channel.name,
-                join_url=join_url,
-                started_at=now_iso(),
+        target_channel = await self._resolve_target_channel(interaction.guild, interaction.user)
+        if target_channel is None:
+            return PowerResult(
+                False,
+                "No usable voice channel was found. Join a voice channel and try again.",
+                {},
             )
 
-            self.logger.info(
-                "Power On requested by %s (%s), guild=%s (%s), channel=%s (%s)",
-                session.requested_by_username,
-                session.requested_by_user_id,
-                session.guild_name,
-                session.guild_id,
-                session.channel_name,
-                session.channel_id,
+        requested_by = interaction.user
+        join_url = f"https://discord.com/channels/{interaction.guild.id}/{target_channel.id}"
+        session = ActiveSession(
+            requested_by_user_id=requested_by.id,
+            requested_by_username=str(requested_by),
+            guild_id=interaction.guild.id,
+            guild_name=interaction.guild.name,
+            channel_id=target_channel.id,
+            channel_name=target_channel.name,
+            join_url=join_url,
+            started_at=now_iso(),
+        )
+
+        self.logger.info(
+            "Power On requested by %s (%s), guild=%s (%s), channel=%s (%s)",
+            session.requested_by_username,
+            session.requested_by_user_id,
+            session.guild_name,
+            session.guild_id,
+            session.channel_name,
+            session.channel_id,
+        )
+
+        current_location = self.find_stream_location()
+        if current_location and current_location.channel.id != target_channel.id:
+            return PowerResult(
+                False,
+                f"{self.config.stream_username} is already active in "
+                f"{current_location.guild.name} / {current_location.channel.name}. "
+                "Power Off there before summoning it anywhere else.",
+                {"stream_account_locked": True},
             )
 
-            current_location = self.find_stream_location()
-            if current_location and current_location.channel.id != target_channel.id:
-                return PowerResult(
-                    False,
-                    f"{self.config.stream_username} is already active in "
-                    f"{current_location.guild.name} / {current_location.channel.name}. "
-                    "Power Off there before summoning it anywhere else.",
-                    {"stream_account_locked": True},
-                )
+        self.state.set_active(session)
 
-            self.state.set_active(session)
+        checks = {
+            "android_tv_on": False,
+            "vlc_open": False,
+            "stream_account_in_channel": False,
+            "stream_active": False,
+        }
+        errors: list[str] = []
 
-            checks = {
-                "android_tv_on": False,
-                "vlc_open": False,
-                "stream_account_in_channel": False,
-                "stream_active": False,
-            }
-            errors: list[str] = []
+        try:
+            await self.tv.ensure_on()
+            checks["android_tv_on"] = True
+        except AndroidTVPairingRequired as exc:
+            self.logger.error("Android TV pairing required: %s", exc)
+            errors.append(str(exc))
+        except AndroidTVError as exc:
+            self.logger.error("Android TV power-on failed: %s", exc)
+            errors.append(str(exc))
 
-            try:
-                await self.tv.ensure_on()
-                checks["android_tv_on"] = True
-            except AndroidTVPairingRequired as exc:
-                self.logger.error("Android TV pairing required: %s", exc)
-                errors.append(str(exc))
-            except AndroidTVError as exc:
-                self.logger.error("Android TV power-on failed: %s", exc)
-                errors.append(str(exc))
+        try:
+            await self.vlc.ensure_open()
+            checks["vlc_open"] = True
+        except VLCError as exc:
+            self.logger.error("VLC check failed: %s", exc)
+            errors.append(str(exc))
 
-            try:
-                await self.vlc.ensure_open()
-                checks["vlc_open"] = True
-            except VLCError as exc:
-                self.logger.error("VLC check failed: %s", exc)
-                errors.append(str(exc))
+        if checks["vlc_open"]:
+            stream_result = await self._ensure_streaming(session, target_channel)
+            checks.update(stream_result.checks)
+            if not stream_result.ok:
+                errors.append(stream_result.message)
+        else:
+            message = "VLC is not open, so stream automation was not attempted."
+            self.logger.error(message)
+            errors.append(message)
 
-            if checks["vlc_open"]:
-                stream_result = await self._ensure_streaming(session, target_channel)
-                checks.update(stream_result.checks)
-                if not stream_result.ok:
-                    errors.append(stream_result.message)
-            else:
-                message = "VLC is not open, so stream automation was not attempted."
-                self.logger.error(message)
-                errors.append(message)
+        if errors:
+            self.logger.error("Power On incomplete: %s", " | ".join(errors))
+            return PowerResult(
+                False,
+                "Power On incomplete: " + " | ".join(errors),
+                checks,
+            )
 
-            if errors:
-                self.logger.error("Power On incomplete: %s", " | ".join(errors))
-                return PowerResult(
-                    False,
-                    "Power On incomplete: " + " | ".join(errors),
-                    checks,
-                )
-
-            self.logger.info("Power On complete")
-            return PowerResult(True, "Powered On and streaming VLC.", checks)
+        self.logger.info("Power On complete")
+        return PowerResult(True, "Powered On and streaming VLC.", checks)
 
     async def power_off(self, interaction: discord.Interaction) -> PowerResult:
         blocked = self._begin_lifecycle_action("Power Off")
@@ -306,60 +324,107 @@ class PowerCoordinator:
         finally:
             self._end_lifecycle_action("Power Off")
 
-    async def _power_off_locked(self, interaction: discord.Interaction) -> PowerResult:
-            self.logger.info("Power Off requested by %s", interaction.user)
-            location = self.find_stream_location()
-            if location is None:
-                self.state.clear_active()
-                checks: dict[str, bool] = {}
-                tv_error = await self._power_off_android_tv(checks)
-                message = f"Powered Off. {self.config.stream_username} was not in voice."
-                if tv_error:
-                    message += f" Android TV power-off failed: {tv_error}"
-                return PowerResult(True, message, checks)
+    async def refresh_tv_box(self, interaction: discord.Interaction) -> PowerResult:
+        blocked = self._begin_lifecycle_action("Refresh TV")
+        if blocked:
+            return blocked
 
-            stream_account_alone = self._stream_account_is_alone(location)
-            if (
-                interaction.guild is not None
-                and interaction.guild.id != location.guild.id
-                and not stream_account_alone
-            ):
+        try:
+            async with self._lock:
+                return await self._refresh_tv_box_locked(interaction)
+        finally:
+            self._end_lifecycle_action("Refresh TV")
+
+    async def _refresh_tv_box_locked(self, interaction: discord.Interaction) -> PowerResult:
+        if interaction.guild is None:
+            return PowerResult(False, "Use Refresh from a server.", {})
+
+        self.logger.info("Refresh TV requested by %s", interaction.user)
+        try:
+            await self.tv.refresh_power_cycle()
+        except AndroidTVPairingRequired as exc:
+            self.logger.error("Refresh TV failed: Android TV pairing required: %s", exc)
+            return PowerResult(
+                False,
+                str(exc),
+                {"android_tv_refresh_completed": False},
+            )
+        except AndroidTVError as exc:
+            self.logger.error("Refresh TV failed: %s", exc)
+            return PowerResult(
+                False,
+                f"Refresh TV failed: {exc}",
+                {"android_tv_refresh_completed": False},
+            )
+
+        return PowerResult(
+            True,
+            "Refreshed Android TV Box: sent POWER, waited 5 seconds, then sent POWER again.",
+            {"android_tv_refresh_completed": True},
+        )
+
+    async def _power_off_locked(self, interaction: discord.Interaction) -> PowerResult:
+        self.logger.info("Power Off requested by %s", interaction.user)
+        location = self.find_stream_location()
+        if location is None:
+            self.state.clear_active()
+            checks: dict[str, bool] = {}
+            tv_error = await self._power_off_android_tv(checks)
+            if tv_error:
                 return PowerResult(
                     False,
-                    f"{self.config.stream_username} is active in "
-                    f"{location.guild.name} / {location.channel.name}. "
-                    "Power Off must be run from the active server.",
-                    {"stream_account_disconnected": False},
+                    (
+                        f"{self.config.stream_username} was not in voice, and Android TV "
+                        f"power-off failed: {tv_error}"
+                    ),
+                    checks,
                 )
+            message = f"Powered Off. {self.config.stream_username} was not in voice."
+            return PowerResult(True, message, checks)
 
-            if stream_account_alone and interaction.guild is not None:
-                self.logger.info(
-                    "Power Off bypassing active-server check because stream account is alone "
-                    "in %s / %s",
-                    location.guild.name,
-                    location.channel.name,
-                )
-
-            result = await self._disconnect_stream_account(
-                location,
-                reason="iChangeChannels Power Off",
-                message="Powered Off. Disconnected the stream account and powered off the Android TV.",
+        stream_account_alone = self._stream_account_is_alone(location)
+        if (
+            interaction.guild is not None
+            and interaction.guild.id != location.guild.id
+            and not stream_account_alone
+        ):
+            return PowerResult(
+                False,
+                f"{self.config.stream_username} is active in "
+                f"{location.guild.name} / {location.channel.name}. "
+                "Power Off must be run from the active server.",
+                {"stream_account_disconnected": False},
             )
-            if not result.ok:
-                return result
 
-            tv_error = await self._power_off_android_tv(result.checks)
-            if tv_error:
-                result.message = (
-                    f"Disconnected {self.config.stream_username}, but the Android TV "
-                    f"power-off failed: {tv_error}"
-                )
+        if stream_account_alone and interaction.guild is not None:
+            self.logger.info(
+                "Power Off bypassing active-server check because stream account is alone "
+                "in %s / %s",
+                location.guild.name,
+                location.channel.name,
+            )
 
-            if stream_account_alone:
-                self._release_remote_control_lock(
-                    "Power Off disconnected stream account while it was alone"
-                )
+        result = await self._disconnect_stream_account(
+            location,
+            reason="iChangeChannels Power Off",
+            message="Powered Off. Disconnected the stream account and powered off the Android TV.",
+        )
+        if not result.ok:
             return result
+
+        tv_error = await self._power_off_android_tv(result.checks)
+        if tv_error:
+            result.ok = False
+            result.message = (
+                f"Disconnected {self.config.stream_username}, but the Android TV "
+                f"power-off failed: {tv_error}"
+            )
+
+        if stream_account_alone:
+            self._release_remote_control_lock(
+                "Power Off disconnected stream account while it was alone"
+            )
+        return result
 
     async def _power_off_android_tv(self, checks: dict[str, bool]) -> str | None:
         try:
@@ -382,32 +447,32 @@ class PowerCoordinator:
         reason: str,
         message: str,
     ) -> PowerResult:
-            try:
-                await location.member.move_to(None, reason=reason)
-            except discord.Forbidden:
-                return PowerResult(
-                    False,
-                    f"I do not have permission to disconnect {self.config.stream_username}.",
-                    {"stream_account_disconnected": False},
-                )
-            except discord.HTTPException as exc:
-                return PowerResult(
-                    False,
-                    f"Discord refused the disconnect: {exc}",
-                    {"stream_account_disconnected": False},
-                )
-
-            self.state.clear_active()
-            self.logger.info(
-                "Disconnected stream account from %s / %s",
-                location.guild.name,
-                location.channel.name,
-            )
+        try:
+            await location.member.move_to(None, reason=reason)
+        except discord.Forbidden:
             return PowerResult(
-                True,
-                message,
-                {"stream_account_disconnected": True},
+                False,
+                f"I do not have permission to disconnect {self.config.stream_username}.",
+                {"stream_account_disconnected": False},
             )
+        except discord.HTTPException as exc:
+            return PowerResult(
+                False,
+                f"Discord refused the disconnect: {exc}",
+                {"stream_account_disconnected": False},
+            )
+
+        self.state.clear_active()
+        self.logger.info(
+            "Disconnected stream account from %s / %s",
+            location.guild.name,
+            location.channel.name,
+        )
+        return PowerResult(
+            True,
+            message,
+            {"stream_account_disconnected": True},
+        )
 
     async def status(self) -> PowerResult:
         if self._status_running:
@@ -460,6 +525,20 @@ class PowerCoordinator:
         user_id: int,
         guild_id: int | None,
     ) -> PowerResult:
+        if self._active_lifecycle_action is not None:
+            self.logger.warning(
+                "TV key rejected: %s already in progress user_id=%s guild_id=%s action=%s",
+                self._active_lifecycle_action,
+                user_id,
+                guild_id,
+                action,
+            )
+            return PowerResult(
+                False,
+                f"{self._active_lifecycle_action} is already in progress; input was not sent.",
+                {"action_rejected_in_progress": True},
+            )
+
         scope = f"{guild_id or 'dm'}:{user_id}"
         if self._key_pending >= self.config.remote_key_queue_limit:
             self.logger.warning(
@@ -522,8 +601,29 @@ class PowerCoordinator:
 
         return (
             f"{result.holder.username} is using the remote right now. "
-            "It unlocks after 5 minutes without button presses "
-            f"({self._format_remote_lock_remaining(result.remaining_seconds)} left)."
+            f"Remote unlocks in {self._format_remote_lock_countdown(result.remaining_seconds)}."
+        )
+
+    def remote_control_lease_expires_at(self, *, user_id: int | None = None) -> int | None:
+        remaining = self._remote_control_lock.remaining_seconds(user_id=user_id)
+        if remaining is None:
+            return None
+        return self._remote_control_unlocks_at(remaining)
+
+    def remote_control_lease_remaining_seconds(
+        self, *, user_id: int | None = None
+    ) -> int | None:
+        return self._remote_control_lock.remaining_seconds(user_id=user_id)
+
+    def remote_control_lockout_message(self) -> str | None:
+        lease = self._remote_control_lock.active_lease()
+        remaining = self._remote_control_lock.remaining_seconds()
+        if lease is None or remaining is None:
+            return None
+
+        return (
+            f"{lease.username} is using the remote right now. "
+            f"Remote unlocks in {self._format_remote_lock_countdown(remaining)}."
         )
 
     def remote_control_block_reason(self, guild: discord.Guild | None) -> str | None:
@@ -653,6 +753,13 @@ class PowerCoordinator:
             return f"{minutes}m"
         return f"{seconds}s"
 
+    def _format_remote_lock_countdown(self, seconds: int) -> str:
+        minutes, seconds = divmod(max(0, seconds), 60)
+        return f"{minutes:02}:{seconds:02}"
+
+    def _remote_control_unlocks_at(self, remaining_seconds: int) -> int:
+        return math.ceil(time.time() + remaining_seconds)
+
     async def _ensure_streaming(
         self, session: ActiveSession, target_channel: discord.abc.GuildChannel
     ) -> PowerResult:
@@ -744,6 +851,18 @@ class PowerCoordinator:
             await self.desktop.start_vlc_stream()
         except DesktopAutomationError as exc:
             self.logger.error("Discord stream automation failed: %s", exc)
+            if await self._wait_for_streaming(target_channel.id):
+                self.logger.warning(
+                    "Discord reports stream active after desktop automation error; "
+                    "treating stream start as successful: %s",
+                    exc,
+                )
+                return PowerResult(
+                    True,
+                    "Stream account started streaming, although Discord desktop "
+                    f"automation reported after the fact: {exc}",
+                    {"stream_account_in_channel": True, "stream_active": True},
+                )
             return PowerResult(
                 False,
                 f"Could not automate Discord Go Live: {exc}",

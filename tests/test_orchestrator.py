@@ -9,7 +9,9 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from ichannel.android_tv import AndroidTVError  # noqa: E402
 from ichannel.config import AppConfig  # noqa: E402
+from ichannel.discord_desktop import DesktopAutomationError  # noqa: E402
 from ichannel.orchestrator import PowerCoordinator  # noqa: E402
 
 
@@ -53,13 +55,34 @@ class FakeBot:
 class FakeTV:
     def __init__(self) -> None:
         self.ensure_off_calls = 0
+        self.ensure_off_error: Exception | None = None
+        self.refresh_power_cycle_calls = 0
+        self.refresh_power_cycle_error: Exception | None = None
 
     async def ensure_off(self) -> bool:
         self.ensure_off_calls += 1
+        if self.ensure_off_error is not None:
+            raise self.ensure_off_error
         return True
 
+    async def refresh_power_cycle(self) -> None:
+        self.refresh_power_cycle_calls += 1
+        if self.refresh_power_cycle_error is not None:
+            raise self.refresh_power_cycle_error
 
-def make_config(state_file: Path) -> AppConfig:
+
+class FakeDesktop:
+    def __init__(self, stream_member: FakeMember) -> None:
+        self.stream_member = stream_member
+        self.start_vlc_stream_calls = 0
+
+    async def start_vlc_stream(self) -> None:
+        self.start_vlc_stream_calls += 1
+        self.stream_member.voice.self_stream = True
+        raise DesktopAutomationError("Go Live button disappeared")
+
+
+def make_config(state_file: Path, *, desktop_automation_enabled: bool = False) -> AppConfig:
     return AppConfig(
         discord_token="token",
         stream_user_id=STREAM_USER_ID,
@@ -75,17 +98,14 @@ def make_config(state_file: Path) -> AppConfig:
         vlc_window_title="VLC media player",
         vlc_window_rect=None,
         vlc_window_show_cmd=None,
-        data_dir=state_file.parent,
         log_file=state_file.parent / "ichannel.log",
         state_file=state_file,
         command_sync_on_start=False,
-        sync_commands_to_guild_id=None,
-        power_on_timeout_seconds=1,
         android_tv_power_timeout_seconds=1,
         discord_join_timeout_seconds=1,
         discord_stream_timeout_seconds=1,
         vlc_start_timeout_seconds=1,
-        desktop_automation_enabled=False,
+        desktop_automation_enabled=desktop_automation_enabled,
         remote_key_rate_per_second=10,
         remote_key_burst=5,
         remote_number_rate_per_second=6,
@@ -95,8 +115,20 @@ def make_config(state_file: Path) -> AppConfig:
 
 
 class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
-    def build_coordinator(self, guilds: list[FakeGuild], state_file: Path) -> PowerCoordinator:
-        coordinator = PowerCoordinator(FakeBot(guilds), make_config(state_file))  # type: ignore[arg-type]
+    def build_coordinator(
+        self,
+        guilds: list[FakeGuild],
+        state_file: Path,
+        *,
+        desktop_automation_enabled: bool = False,
+    ) -> PowerCoordinator:
+        coordinator = PowerCoordinator(
+            FakeBot(guilds),
+            make_config(
+                state_file,
+                desktop_automation_enabled=desktop_automation_enabled,
+            ),
+        )  # type: ignore[arg-type]
         coordinator.tv = FakeTV()  # type: ignore[assignment]
         return coordinator
 
@@ -145,6 +177,28 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stream_member.move_to_calls, [])
         self.assertEqual(result.checks, {"stream_account_disconnected": False})
 
+    async def test_power_off_reports_android_tv_failure_after_disconnect(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
+            channel = FakeChannel(100, "Movies", [stream_member])
+            guild = FakeGuild(200, "Active Guild", [channel])
+            coordinator = self.build_coordinator([guild], Path(temp_dir) / "state.json")
+            coordinator.tv.ensure_off_error = AndroidTVError("still reports on")  # type: ignore[attr-defined]
+            interaction = SimpleNamespace(user="requester", guild=guild)
+
+            result = await coordinator.power_off(interaction)  # type: ignore[arg-type]
+
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            stream_member.move_to_calls,
+            [(None, "iChangeChannels Power Off")],
+        )
+        self.assertEqual(
+            result.checks,
+            {"stream_account_disconnected": True, "android_tv_off": False},
+        )
+        self.assertIn("power-off failed", result.message)
+
     async def test_voice_update_disconnects_stream_account_when_last_viewer_leaves(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             stream_member = FakeMember(STREAM_USER_ID, "stream-account")
@@ -171,6 +225,21 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(lock_reason)
         self.assertEqual(tv_off_calls, 1)
+
+    async def test_remote_lockout_message_includes_countdown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            coordinator = self.build_coordinator([], Path(temp_dir) / "state.json")
+
+            self.assertIsNone(
+                coordinator.claim_remote_ui(user_id=1, username="owner", guild_id=200)
+            )
+            lock_reason = coordinator.claim_remote_ui(
+                user_id=2, username="next", guild_id=200
+            )
+
+        self.assertIsNotNone(lock_reason)
+        message = str(lock_reason)
+        self.assertIn("Remote unlocks in 05:00", message)
 
     async def test_manual_stream_disconnect_does_not_power_off_tv(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -201,6 +270,68 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             await coordinator.note_stream_voice_update(stream_member, before, after)  # type: ignore[arg-type]
 
         self.assertEqual(stream_member.move_to_calls, [])
+
+    async def test_refresh_tv_box_power_cycles_tv_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            channel = FakeChannel(100, "Movies", [])
+            guild = FakeGuild(200, "Active Guild", [channel])
+            coordinator = self.build_coordinator([guild], Path(temp_dir) / "state.json")
+            interaction = SimpleNamespace(user="requester", guild=guild)
+
+            result = await coordinator.refresh_tv_box(interaction)  # type: ignore[arg-type]
+            refresh_power_cycle_calls = coordinator.tv.refresh_power_cycle_calls  # type: ignore[attr-defined]
+
+        self.assertTrue(result.ok)
+        self.assertEqual(refresh_power_cycle_calls, 1)
+        self.assertEqual(
+            result.checks,
+            {"android_tv_refresh_completed": True},
+        )
+
+    async def test_refresh_tv_box_reports_android_tv_failure_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            channel = FakeChannel(100, "Movies", [])
+            guild = FakeGuild(200, "Active Guild", [channel])
+            coordinator = self.build_coordinator([guild], Path(temp_dir) / "state.json")
+            coordinator.tv.refresh_power_cycle_error = AndroidTVError("POWER did not send")  # type: ignore[attr-defined]
+            interaction = SimpleNamespace(user="requester", guild=guild)
+
+            with self.assertLogs("ichannel.power", level="ERROR"):
+                result = await coordinator.refresh_tv_box(interaction)  # type: ignore[arg-type]
+
+        self.assertFalse(result.ok)
+        self.assertIn("POWER did not send", result.message)
+        self.assertEqual(
+            result.checks,
+            {"android_tv_refresh_completed": False},
+        )
+
+    async def test_ensure_streaming_accepts_discord_live_state_after_desktop_error(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            stream_member = FakeMember(STREAM_USER_ID, "stream-account")
+            stream_member.voice.self_stream = False
+            channel = FakeChannel(100, "Movies", [stream_member])
+            guild = FakeGuild(200, "Active Guild", [channel])
+            coordinator = self.build_coordinator(
+                [guild],
+                Path(temp_dir) / "state.json",
+                desktop_automation_enabled=True,
+            )
+            desktop = FakeDesktop(stream_member)
+            coordinator.desktop = desktop  # type: ignore[assignment]
+            session = SimpleNamespace(join_url="https://discord.com/channels/200/100")
+
+            result = await coordinator._ensure_streaming(session, channel)  # type: ignore[arg-type]
+
+        self.assertTrue(result.ok)
+        self.assertEqual(desktop.start_vlc_stream_calls, 1)
+        self.assertEqual(
+            result.checks,
+            {"stream_account_in_channel": True, "stream_active": True},
+        )
+        self.assertIn("started streaming", result.message)
 
 
 if __name__ == "__main__":

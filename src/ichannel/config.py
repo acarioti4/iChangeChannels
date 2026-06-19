@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,12 +26,9 @@ class AppConfig:
     vlc_window_title: str
     vlc_window_rect: tuple[int, int, int, int] | None
     vlc_window_show_cmd: int | None
-    data_dir: Path
     log_file: Path
     state_file: Path
     command_sync_on_start: bool
-    sync_commands_to_guild_id: int | None
-    power_on_timeout_seconds: float
     android_tv_power_timeout_seconds: float
     discord_join_timeout_seconds: float
     discord_stream_timeout_seconds: float
@@ -57,8 +55,8 @@ def load_config(env_file: Path | str = ".env") -> AppConfig:
         stream_user_id = int(stream_user_id_raw)
     except ValueError as exc:
         raise ConfigError("STREAM_USER_ID must be a numeric Discord user ID") from exc
-
-    sync_guild_id = _get_optional_int(merged, "SYNC_COMMANDS_TO_GUILD_ID")
+    if stream_user_id <= 0:
+        raise ConfigError("STREAM_USER_ID must be greater than zero")
 
     certfile = _resolve_path(base_dir, _require(merged, "ANDROID_TV_CERTFILE"))
     keyfile = _resolve_path(base_dir, _require(merged, "ANDROID_TV_KEYFILE"))
@@ -79,12 +77,9 @@ def load_config(env_file: Path | str = ".env") -> AppConfig:
         vlc_window_title=_get(merged, "VLC_WINDOW_TITLE", "VLC media player"),
         vlc_window_rect=_get_optional_rect(merged, "VLC_WINDOW_RECT"),
         vlc_window_show_cmd=_get_optional_int(merged, "VLC_WINDOW_SHOW_CMD"),
-        data_dir=data_dir,
         log_file=log_file,
         state_file=state_file,
         command_sync_on_start=_get_bool(merged, "COMMAND_SYNC_ON_START", True),
-        sync_commands_to_guild_id=sync_guild_id,
-        power_on_timeout_seconds=_get_float(merged, "POWER_ON_TIMEOUT_SECONDS", 45),
         android_tv_power_timeout_seconds=_get_float(
             merged, "ANDROID_TV_POWER_TIMEOUT_SECONDS", 12
         ),
@@ -164,9 +159,14 @@ def _get_float(env: dict[str, str], key: str, default: float) -> float:
     if not raw.strip():
         return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be a number") from exc
+    if not math.isfinite(value):
+        raise ConfigError(f"{key} must be finite")
+    if value < 0:
+        raise ConfigError(f"{key} must be zero or greater")
+    return value
 
 
 def _get_int(env: dict[str, str], key: str, default: int) -> int:
@@ -187,9 +187,12 @@ def _get_optional_int(env: dict[str, str], key: str) -> int | None:
     if not raw:
         return None
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError as exc:
         raise ConfigError(f"{key} must be a numeric ID") from exc
+    if value <= 0:
+        raise ConfigError(f"{key} must be greater than zero")
+    return value
 
 
 def _get_optional_rect(env: dict[str, str], key: str) -> tuple[int, int, int, int] | None:
@@ -218,7 +221,6 @@ def _split_args(value: str) -> list[str]:
     try:
         import shlex
 
-        shlex.split(value, posix=True)
-        return shlex.split(value, posix=False)
+        return shlex.split(value, posix=True)
     except ValueError as exc:
         raise ConfigError(f"VLC_ARGS contains invalid quoting: {exc}") from exc

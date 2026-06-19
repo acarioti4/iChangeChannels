@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import sys
 from pathlib import Path
 
 import psutil
@@ -16,10 +17,17 @@ class RECT(ctypes.Structure):
 
 
 def main() -> int:
+    if sys.platform != "win32":
+        print("This script only inspects VLC windows on Windows.")
+        return 1
+
     vlc_pids: set[int] = set()
     for process in psutil.process_iter(attrs=["pid", "name", "exe"]):
-        name = (process.info.get("name") or "").lower()
-        exe = (Path(process.info.get("exe") or "").name).lower()
+        try:
+            name = (process.info.get("name") or "").lower()
+            exe = (Path(process.info.get("exe") or "").name).lower()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
         if name in {"vlc.exe", "vlc"} or exe in {"vlc.exe", "vlc"}:
             vlc_pids.add(int(process.info["pid"]))
 

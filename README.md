@@ -48,7 +48,7 @@ not restart VLC or move the stream account.
 Power Off disconnects the stream account from voice through the Discord API and
 then powers off the Android TV box (it sends POWER only if the TV reports as on).
 It does not close VLC. If the Android TV power-off fails, the stream account is
-still disconnected and the failure is reported in the result.
+still disconnected and the result is reported as needing attention.
 
 If the last viewer leaves and the stream account is the only account left in the
 voice channel, the bot automatically disconnects the stream account, powers off
@@ -118,7 +118,6 @@ DISCORD_BOT_TOKEN=
 STREAM_USER_ID=
 STREAM_USERNAME=the stream account
 DISCORD_DM_SEARCH=iChangeChannels
-SYNC_COMMANDS_TO_GUILD_ID=
 COMMAND_SYNC_ON_START=true
 
 # Leave blank to let scripts\pair_android_tv.py discover and fill it in.
@@ -134,7 +133,6 @@ VLC_WINDOW_TITLE=VLC media player
 VLC_WINDOW_RECT=
 VLC_WINDOW_SHOW_CMD=
 
-POWER_ON_TIMEOUT_SECONDS=45
 ANDROID_TV_POWER_TIMEOUT_SECONDS=12
 DISCORD_JOIN_TIMEOUT_SECONDS=20
 DISCORD_STREAM_TIMEOUT_SECONDS=25
@@ -144,9 +142,6 @@ DESKTOP_AUTOMATION_ENABLED=true
 DATA_DIR=data
 LOG_FILE=data/ichannel.log
 ```
-
-Use `SYNC_COMMANDS_TO_GUILD_ID` during testing for fast slash-command sync. Leave
-it blank for global command sync.
 
 ## VLC Window Capture
 
@@ -246,8 +241,8 @@ Discord layout directly rather than masking the failure.
 
 ## Troubleshooting
 
-- If `/remote` does not appear, set `SYNC_COMMANDS_TO_GUILD_ID` to a test server
-  ID and restart the bot for immediate guild-level sync.
+- If `/remote` does not appear, restart the bot with `COMMAND_SYNC_ON_START=true`
+  and refresh Discord after the global command sync completes.
 - If Android TV pairing fails, rerun `scripts\pair_android_tv.py` and make sure
   the TV is on the same network.
 - If VLC is already running but in the wrong place, close VLC and let the bot
