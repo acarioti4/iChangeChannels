@@ -83,18 +83,31 @@ class RemoteView(discord.ui.View):
         owner_id: int,
         panel: str = "nav",
         status: str | None = None,
+        is_admin: bool = False,
+        locked_out: bool | None = None,
     ) -> None:
         super().__init__(timeout=15 * 60)
         self.coordinator = coordinator
         self.owner_id = owner_id
         self.panel = panel if panel in PANEL_NAMES else "nav"
         self.status = status
+        self.is_admin = is_admin
+        self.locked_out = self._compute_locked_out() if locked_out is None else locked_out
         self._countdown_task: asyncio.Task[None] | None = None
 
         self.add_item(RemoteButton("Power On", "power_on", row=0, style=discord.ButtonStyle.success))
         self.add_item(RemoteButton("Power Off", "power_off", row=0, style=discord.ButtonStyle.danger))
         self.add_item(RemoteButton("Refresh", "refresh_tv", row=0, style=discord.ButtonStyle.secondary))
         self.add_item(RemoteButton("Status", "status", row=0, style=discord.ButtonStyle.secondary))
+        if self.is_admin:
+            self.add_item(
+                RemoteButton(
+                    "Take Control",
+                    "take_control",
+                    row=0,
+                    style=discord.ButtonStyle.primary,
+                )
+            )
 
         if self.panel == "nav":
             self._add_nav_panel()
@@ -104,12 +117,26 @@ class RemoteView(discord.ui.View):
             self._add_numpad_panel()
 
         self._add_tabs()
+        self._refresh_button_disabled_states()
 
     def content(self) -> str:
         remaining_seconds = self.coordinator.remote_control_lease_remaining_seconds(
             user_id=self.owner_id
         )
-        return _remote_content(self.panel, self.status, remaining_seconds)
+        lock_notice = None
+        unlocked_notice = None
+        show_lock_state = not self.is_admin or remaining_seconds is not None
+        if show_lock_state and remaining_seconds is None:
+            lock_notice = self.coordinator.remote_control_lockout_message()
+            if lock_notice is None:
+                unlocked_notice = REMOTE_UNLOCKED_MESSAGE
+        return _remote_content(
+            self.panel,
+            self.status,
+            remaining_seconds,
+            lock_notice,
+            unlocked_notice,
+        )
 
     def bind_countdown_to_interaction(self, interaction: discord.Interaction) -> None:
         self.start_countdown(
@@ -153,13 +180,13 @@ class RemoteView(discord.ui.View):
         try:
             while True:
                 await asyncio.sleep(interval_seconds)
-                if self.coordinator.remote_control_lease_remaining_seconds(
-                    user_id=self.owner_id
-                ) is None:
-                    await edit(REMOTE_UNLOCKED_MESSAGE, None)
-                    return
+                locked_out = self._compute_locked_out()
+                locked_out_changed = locked_out != self.locked_out
+                if locked_out_changed:
+                    self.locked_out = locked_out
+                    self._refresh_button_disabled_states()
                 next_content = self.content()
-                if next_content != last_content:
+                if locked_out_changed or next_content != last_content:
                     await edit(next_content, self)
                     last_content = next_content
         except (discord.Forbidden, discord.HTTPException, discord.NotFound):
@@ -219,10 +246,11 @@ class RemoteView(discord.ui.View):
 
     def _add_tabs(self) -> None:
         for panel, label in PANEL_NAMES.items():
+            action = f"tab_{panel}"
             self.add_item(
                 RemoteButton(
                     label,
-                    f"tab_{panel}",
+                    action,
                     row=4,
                     style=discord.ButtonStyle.primary
                     if panel == self.panel
@@ -231,6 +259,27 @@ class RemoteView(discord.ui.View):
                 )
             )
 
+    def _compute_locked_out(self) -> bool:
+        if self.is_admin:
+            return False
+        if self.coordinator.remote_control_lease_remaining_seconds(
+            user_id=self.owner_id
+        ) is not None:
+            return False
+        return self.coordinator.remote_control_lockout_message() is not None
+
+    def _action_is_disabled(self, action: str) -> bool:
+        if self.locked_out:
+            return not (self.is_admin and action == "take_control")
+        if action.startswith("tab_"):
+            return action.removeprefix("tab_") == self.panel
+        return False
+
+    def _refresh_button_disabled_states(self) -> None:
+        for item in self.children:
+            if isinstance(item, RemoteButton):
+                item.disabled = self._action_is_disabled(item.action)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user and interaction.user.id == self.owner_id:
             return True
@@ -238,14 +287,42 @@ class RemoteView(discord.ui.View):
         return False
 
     async def handle_action(self, interaction: discord.Interaction, action: str) -> None:
-        lock_reason = self.coordinator.claim_remote_ui(
-            user_id=interaction.user.id,
-            username=str(interaction.user),
-            guild_id=interaction.guild.id if interaction.guild else None,
-        )
-        if lock_reason:
-            await self._edit_remote_response(interaction, status=lock_reason)
+        if action == "take_control":
+            if not self.coordinator.is_remote_admin(interaction.user):
+                await self._edit_remote_response(
+                    interaction,
+                    status="Only configured admins can take control of the remote.",
+                )
+                return
+
+            self.stop_countdown()
+            status = self.coordinator.take_remote_control(
+                user=interaction.user,
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
+            await self._edit_remote_response(interaction, status=status)
             return
+
+        is_admin = self.coordinator.is_remote_admin(interaction.user)
+        should_claim_remote = True
+        if is_admin:
+            should_claim_remote = (
+                self.coordinator.remote_control_lease_remaining_seconds(
+                    user_id=interaction.user.id
+                )
+                is not None
+            )
+
+        if should_claim_remote:
+            lock_reason = self.coordinator.claim_remote_ui(
+                user_id=interaction.user.id,
+                username=str(interaction.user),
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
+            if lock_reason:
+                self.stop_countdown()
+                await self._edit_remote_response(interaction, status=None)
+                return
 
         self.stop_countdown()
 
@@ -256,6 +333,7 @@ class RemoteView(discord.ui.View):
                 owner_id=self.owner_id,
                 panel=panel,
                 status=self.status,
+                is_admin=self.is_admin,
             )
             await interaction.response.edit_message(
                 content=view.content(),
@@ -310,13 +388,14 @@ class RemoteView(discord.ui.View):
         self,
         interaction: discord.Interaction,
         *,
-        status: str,
+        status: str | None,
     ) -> None:
         view = RemoteView(
             self.coordinator,
             owner_id=self.owner_id,
             panel=self.panel,
             status=status,
+            is_admin=self.is_admin,
         )
         await interaction.response.edit_message(
             content=view.content(),
@@ -328,13 +407,14 @@ class RemoteView(discord.ui.View):
         self,
         interaction: discord.Interaction,
         *,
-        status: str,
+        status: str | None,
     ) -> None:
         view = RemoteView(
             self.coordinator,
             owner_id=self.owner_id,
             panel=self.panel,
             status=status,
+            is_admin=self.is_admin,
         )
         await interaction.edit_original_response(
             content=view.content(),
@@ -379,18 +459,6 @@ class IChangeChannelsBot(commands.Bot):
             "Synced %s global slash command(s)",
             len(global_synced),
         )
-        await self._clear_stale_guild_commands()
-
-    async def _clear_stale_guild_commands(self) -> None:
-        for guild in self.guilds:
-            guild_object = discord.Object(id=guild.id)
-            self.tree.clear_commands(guild=guild_object)
-            synced = await self.tree.sync(guild=guild_object)
-            self.logger.info(
-                "Cleared stale slash commands from guild %s (%s remaining)",
-                guild.id,
-                len(synced),
-            )
 
     async def on_voice_state_update(
         self,
@@ -407,17 +475,38 @@ class IChangeChannelsBot(commands.Bot):
             )
             return
 
-        lock_reason = self.coordinator.claim_remote_ui(
-            user_id=interaction.user.id,
-            username=str(interaction.user),
-            guild_id=interaction.guild.id,
+        is_admin = self.coordinator.is_remote_admin(interaction.user)
+        lock_reason = None
+        admin_has_active_lease = (
+            is_admin
+            and self.coordinator.remote_control_lease_remaining_seconds(
+                user_id=interaction.user.id
+            )
+            is not None
         )
-        if lock_reason:
-            await interaction.response.send_message(lock_reason, ephemeral=True)
-            _start_lockout_countdown(self.coordinator, interaction)
+        if not is_admin or admin_has_active_lease:
+            lock_reason = self.coordinator.claim_remote_ui(
+                user_id=interaction.user.id,
+                username=str(interaction.user),
+                guild_id=interaction.guild.id,
+            )
+        if lock_reason and not is_admin:
+            view = RemoteView(
+                self.coordinator,
+                owner_id=interaction.user.id,
+                locked_out=True,
+            )
+            await interaction.response.send_message(
+                view.content(), view=view, ephemeral=True
+            )
+            view.bind_countdown_to_interaction(interaction)
             return
 
-        view = RemoteView(self.coordinator, owner_id=interaction.user.id)
+        view = RemoteView(
+            self.coordinator,
+            owner_id=interaction.user.id,
+            is_admin=is_admin,
+        )
         await interaction.response.send_message(
             view.content(), view=view, ephemeral=True
         )
@@ -440,10 +529,20 @@ def _format_result(result: PowerResult, *, include_checks: bool = True) -> str:
     return "\n".join(lines)
 
 
-def _remote_content(panel: str, status: str | None, remaining_seconds: int | None) -> str:
+def _remote_content(
+    panel: str,
+    status: str | None,
+    remaining_seconds: int | None,
+    lock_notice: str | None = None,
+    unlocked_notice: str | None = None,
+) -> str:
     lines = [f"iChangeChannels remote - {PANEL_NAMES[panel]}"]
     if remaining_seconds is not None:
-        lines.append(f"Remote unlocks in {_format_countdown(remaining_seconds)}")
+        lines.append(f"Remote is yours for {_format_duration(remaining_seconds)}")
+    elif lock_notice:
+        lines.append(lock_notice)
+    elif unlocked_notice:
+        lines.append(unlocked_notice)
     if status:
         lines.extend(["", status])
 
@@ -454,38 +553,8 @@ def _remote_content(panel: str, status: str | None, remaining_seconds: int | Non
     return content[:1997] + "..."
 
 
-def _format_countdown(seconds: int) -> str:
+def _format_duration(seconds: int) -> str:
     minutes, seconds = divmod(max(0, seconds), 60)
-    return f"{minutes:02}:{seconds:02}"
-
-
-def _start_lockout_countdown(
-    coordinator: PowerCoordinator,
-    interaction: discord.Interaction,
-    *,
-    interval_seconds: float = REMOTE_COUNTDOWN_UPDATE_INTERVAL_SECONDS,
-) -> None:
-    asyncio.create_task(
-        _run_lockout_countdown(coordinator, interaction, interval_seconds)
-    )
-
-
-async def _run_lockout_countdown(
-    coordinator: PowerCoordinator,
-    interaction: discord.Interaction,
-    interval_seconds: float,
-) -> None:
-    last_content = coordinator.remote_control_lockout_message() or REMOTE_UNLOCKED_MESSAGE
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            next_content = coordinator.remote_control_lockout_message()
-            if next_content is None:
-                if last_content != REMOTE_UNLOCKED_MESSAGE:
-                    await interaction.edit_original_response(content=REMOTE_UNLOCKED_MESSAGE)
-                return
-            if next_content != last_content:
-                await interaction.edit_original_response(content=next_content)
-                last_content = next_content
-    except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-        return
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"

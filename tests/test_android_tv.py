@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from ichannel.android_tv import AndroidTVController  # noqa: E402
+from ichannel.android_tv import AndroidTVController, AndroidTVError  # noqa: E402
 
 
 class CannotConnect(Exception):
@@ -243,7 +243,7 @@ class AndroidTVControllerTests(unittest.IsolatedAsyncioTestCase):
                 certfile=Path(temp_dir) / "cert.pem",
                 keyfile=Path(temp_dir) / "key.pem",
                 client_name="iChangeChannels",
-                power_timeout_seconds=0.2,
+                power_timeout_seconds=0.01,
                 logger=logging.getLogger("test"),
             )
 
@@ -258,7 +258,33 @@ class AndroidTVControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(FakeRemote.power_state)
         self.assertEqual(key_commands, ["POWER"])
 
-    async def test_ensure_off_does_not_fail_when_confirmation_times_out(self) -> None:
+    async def test_ensure_on_fails_when_confirmation_times_out(self) -> None:
+        FakeRemote.power_state = False
+        FakeRemote.power_key_changes_state = False
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            controller = AndroidTVController(
+                host="192.0.2.10",
+                certfile=Path(temp_dir) / "cert.pem",
+                keyfile=Path(temp_dir) / "key.pem",
+                client_name="iChangeChannels",
+                power_timeout_seconds=0.01,
+                logger=logging.getLogger("test"),
+            )
+
+            with patch.dict(sys.modules, {"androidtvremote2": fake_androidtvremote2_module()}):
+                with self.assertRaisesRegex(AndroidTVError, "powered on"):
+                    await controller.ensure_on()
+
+        key_commands = [
+            command
+            for remote in FakeRemote.instances
+            for command in remote.key_commands
+        ]
+        self.assertFalse(FakeRemote.power_state)
+        self.assertEqual(key_commands, ["POWER"])
+
+    async def test_ensure_off_fails_when_confirmation_times_out(self) -> None:
         FakeRemote.power_key_changes_state = False
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,15 +298,14 @@ class AndroidTVControllerTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch.dict(sys.modules, {"androidtvremote2": fake_androidtvremote2_module()}):
-                with self.assertLogs("test", level="WARNING"):
-                    result = await controller.ensure_off()
+                with self.assertRaisesRegex(AndroidTVError, "powered off"):
+                    await controller.ensure_off()
 
         key_commands = [
             command
             for remote in FakeRemote.instances
             for command in remote.key_commands
         ]
-        self.assertTrue(result)
         self.assertTrue(FakeRemote.power_state)
         self.assertEqual(key_commands, ["POWER"])
 

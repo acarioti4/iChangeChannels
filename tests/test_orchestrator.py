@@ -32,6 +32,15 @@ class FakeMember:
         self.move_to_calls.append((channel, reason))
 
 
+class FakeUser:
+    def __init__(self, user_id: int, name: str) -> None:
+        self.id = user_id
+        self.name = name
+
+    def __str__(self) -> str:
+        return self.name
+
+
 class FakeChannel:
     def __init__(self, channel_id: int, name: str, members: list[FakeMember]) -> None:
         self.id = channel_id
@@ -82,11 +91,19 @@ class FakeDesktop:
         raise DesktopAutomationError("Go Live button disappeared")
 
 
-def make_config(state_file: Path, *, desktop_automation_enabled: bool = False) -> AppConfig:
+def make_config(
+    state_file: Path,
+    *,
+    desktop_automation_enabled: bool = False,
+    discord_admin_user_ids: frozenset[int] = frozenset(),
+    discord_admin_usernames: frozenset[str] = frozenset(),
+) -> AppConfig:
     return AppConfig(
         discord_token="token",
         stream_user_id=STREAM_USER_ID,
         stream_username="stream-account",
+        discord_admin_user_ids=discord_admin_user_ids,
+        discord_admin_usernames=discord_admin_usernames,
         discord_dm_search="iChangeChannels",
         android_tv_host="192.0.2.10",
         android_tv_certfile=state_file.parent / "cert.pem",
@@ -121,12 +138,16 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         state_file: Path,
         *,
         desktop_automation_enabled: bool = False,
+        discord_admin_user_ids: frozenset[int] = frozenset(),
+        discord_admin_usernames: frozenset[str] = frozenset(),
     ) -> PowerCoordinator:
         coordinator = PowerCoordinator(
             FakeBot(guilds),
             make_config(
                 state_file,
                 desktop_automation_enabled=desktop_automation_enabled,
+                discord_admin_user_ids=discord_admin_user_ids,
+                discord_admin_usernames=discord_admin_usernames,
             ),
         )  # type: ignore[arg-type]
         coordinator.tv = FakeTV()  # type: ignore[assignment]
@@ -226,7 +247,7 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(lock_reason)
         self.assertEqual(tv_off_calls, 1)
 
-    async def test_remote_lockout_message_includes_countdown(self) -> None:
+    async def test_remote_lockout_message_does_not_include_countdown(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             coordinator = self.build_coordinator([], Path(temp_dir) / "state.json")
 
@@ -239,7 +260,61 @@ class PowerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(lock_reason)
         message = str(lock_reason)
-        self.assertIn("Remote unlocks in 05:00", message)
+        self.assertEqual(message, "owner currently has the remote.")
+
+    async def test_admin_can_take_remote_control_from_standard_user(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            coordinator = self.build_coordinator(
+                [],
+                Path(temp_dir) / "state.json",
+                discord_admin_user_ids=frozenset({99}),
+            )
+            admin = FakeUser(99, "admin")
+
+            self.assertIsNone(
+                coordinator.claim_remote_ui(user_id=1, username="owner", guild_id=200)
+            )
+            message = coordinator.take_remote_control(user=admin, guild_id=200)  # type: ignore[arg-type]
+            lock_reason = coordinator.claim_remote_ui(
+                user_id=2,
+                username="next",
+                guild_id=200,
+            )
+
+        self.assertEqual(message, "Took control of the remote from owner.")
+        self.assertIsNotNone(lock_reason)
+        self.assertIn("admin currently has the remote", str(lock_reason))
+
+    async def test_admin_detection_accepts_configured_username(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            coordinator = self.build_coordinator(
+                [],
+                Path(temp_dir) / "state.json",
+                discord_admin_usernames=frozenset({"adminuser"}),
+            )
+
+            is_admin = coordinator.is_remote_admin(FakeUser(99, "AdminUser"))  # type: ignore[arg-type]
+
+        self.assertTrue(is_admin)
+
+    async def test_non_admin_cannot_take_remote_control(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            coordinator = self.build_coordinator([], Path(temp_dir) / "state.json")
+            user = FakeUser(99, "not-admin")
+
+            self.assertIsNone(
+                coordinator.claim_remote_ui(user_id=1, username="owner", guild_id=200)
+            )
+            message = coordinator.take_remote_control(user=user, guild_id=200)  # type: ignore[arg-type]
+            lock_reason = coordinator.claim_remote_ui(
+                user_id=2,
+                username="next",
+                guild_id=200,
+            )
+
+        self.assertEqual(message, "Only configured admins can take control of the remote.")
+        self.assertIsNotNone(lock_reason)
+        self.assertIn("owner currently has the remote", str(lock_reason))
 
     async def test_manual_stream_disconnect_does_not_power_off_tv(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

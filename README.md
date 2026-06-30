@@ -19,6 +19,13 @@ goes live with VLC. You configure which account that is through `STREAM_USER_ID`
 - Sends an ephemeral Discord remote UI to the user who ran `/remote`.
 - Locks the remote UI to one user at a time, then releases it after 5 minutes
   without button presses so another user can claim it.
+- Still shows the ephemeral remote UI to users who are locked out, with the
+  controls disabled and a message naming the current lock holder.
+- Keeps the ephemeral remote UI visible when the 5-minute lock expires; the bot
+  does not remove the controls just because the lease ended.
+- Allows configured admins to use the remote without lock timers, lock-holder
+  messages, or disabled controls unless they click `Take Control`, which moves
+  the lock to themselves.
 - Provides three remote panels:
   - `Nav`: power/status, directional keys, back, home, menu, volume, mute, play/pause.
   - `Media`: play/pause, stop, rewind, fast-forward, previous, next, channel, info, guide, settings, search.
@@ -89,6 +96,7 @@ accepts network remote commands in standby.
 4. Create `.env` from `.env.example` if it does not already exist, then fill in:
    - `DISCORD_BOT_TOKEN`
    - `STREAM_USER_ID`
+   - `DISCORD_ADMIN_USERS` if you want admin takeover users
    - `ANDROID_TV_HOST` (or leave it blank and let the pairing helper in step 5
      autopopulate it)
    - VLC settings for the dedicated server
@@ -117,6 +125,7 @@ Core `.env` values:
 DISCORD_BOT_TOKEN=
 STREAM_USER_ID=
 STREAM_USERNAME=the stream account
+DISCORD_ADMIN_USERS=
 DISCORD_DM_SEARCH=iChangeChannels
 COMMAND_SYNC_ON_START=true
 
@@ -138,6 +147,12 @@ DISCORD_JOIN_TIMEOUT_SECONDS=20
 DISCORD_STREAM_TIMEOUT_SECONDS=25
 VLC_START_TIMEOUT_SECONDS=8
 DESKTOP_AUTOMATION_ENABLED=true
+
+REMOTE_KEY_RATE_PER_SECOND=10
+REMOTE_KEY_BURST=5
+REMOTE_NUMBER_RATE_PER_SECOND=6
+REMOTE_NUMBER_BURST=3
+REMOTE_KEY_QUEUE_LIMIT=5
 
 DATA_DIR=data
 LOG_FILE=data/ichannel.log
@@ -182,11 +197,19 @@ the bot and helper scripts with matching permissions.
 ## Discord Flow
 
 1. A user runs `/remote` in a server text channel.
-2. If nobody else has pressed remote buttons in the last 5 minutes, the bot
-   replies with an ephemeral `iChangeChannels remote - Nav` UI and locks the
+2. The bot replies with an ephemeral `iChangeChannels remote - Nav` UI. If
+   nobody else has pressed remote buttons in the last 5 minutes, it locks the
    remote to that user.
+   - If another user holds the lock, the UI still appears with its controls
+     disabled and a message naming the current lock holder.
+   - Admins configured in `DISCORD_ADMIN_USERS` bypass the lock entirely: they
+     do not see lock timers or lock-holder messages, and their controls remain
+     enabled. The `Take Control` button overrides the lock and makes the admin
+     the current lock holder.
 3. The user can switch between `Nav`, `Media`, and `Numpad` panels.
-4. Any remote button press refreshes that user's 5-minute remote lock.
+4. Any remote button press refreshes that user's 5-minute remote lock. When the
+   lock expires, the existing ephemeral UI remains visible and can claim the
+   remote again on the next button press.
 5. The user clicks `Power On`.
 6. The bot chooses the voice channel:
    - the requester's current voice channel, if they are in one;
@@ -209,11 +232,11 @@ the bot and helper scripts with matching permissions.
 ## Strict Desktop Automation
 
 Desktop automation intentionally has no coordinate, browser, or URL-opening
-fallbacks. It must find and click the expected Discord UI elements through
-Windows UI Automation:
+fallbacks. It uses Discord's quick switcher to open the configured DM, then must
+find and click the expected Discord UI elements through Windows UI Automation:
 
 - a Discord desktop window;
-- the DM found through `DISCORD_DM_SEARCH`;
+- the DM opened through `DISCORD_DM_SEARCH`;
 - the exact join link text or Discord's rendered `Join Voice` button;
 - `Share Your Screen` or `Share Screen`;
 - the configured `VLC_WINDOW_TITLE` text in the stream picker;

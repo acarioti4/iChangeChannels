@@ -94,6 +94,29 @@ class ConfigTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigError, "STREAM_USER_ID"):
                     load_config(env_file)
 
+    def test_discord_admin_users_accepts_ids_and_usernames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, "DISCORD_ADMIN_USERS=123, AdminUser, admin#1234")
+
+            with patch.dict(os.environ, {}, clear=True):
+                config = load_config(env_file)
+
+        self.assertEqual(config.discord_admin_user_ids, frozenset({123}))
+        self.assertEqual(
+            config.discord_admin_usernames,
+            frozenset({"adminuser", "admin#1234"}),
+        )
+
+    def test_discord_admin_users_rejects_non_positive_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            write_env(env_file, "DISCORD_ADMIN_USERS=0")
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(ConfigError, "DISCORD_ADMIN_USERS"):
+                    load_config(env_file)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -75,10 +75,16 @@ class RemoteControlLock:
         user_id: int,
         username: str,
         guild_id: int | None,
+        force: bool = False,
     ) -> RemoteControlLockResult:
         now = self._clock()
         lease = self._lease
-        if lease and lease.user_id != user_id and not self._is_expired(lease, now):
+        if (
+            lease
+            and lease.user_id != user_id
+            and not force
+            and not self._is_expired(lease, now)
+        ):
             remaining = self.timeout_seconds - (now - lease.last_activity_at)
             return RemoteControlLockResult(
                 allowed=False,
@@ -590,25 +596,60 @@ class PowerCoordinator:
         user_id: int,
         username: str,
         guild_id: int | None,
+        force: bool = False,
     ) -> str | None:
         result = self._remote_control_lock.claim_or_refresh(
             user_id=user_id,
             username=username,
             guild_id=guild_id,
+            force=force,
         )
         if result.allowed or result.holder is None:
             return None
 
-        return (
-            f"{result.holder.username} is using the remote right now. "
-            f"Remote unlocks in {self._format_remote_lock_countdown(result.remaining_seconds)}."
-        )
+        return f"{result.holder.username} currently has the remote."
 
-    def remote_control_lease_expires_at(self, *, user_id: int | None = None) -> int | None:
-        remaining = self._remote_control_lock.remaining_seconds(user_id=user_id)
-        if remaining is None:
-            return None
-        return self._remote_control_unlocks_at(remaining)
+    def take_remote_control(
+        self,
+        *,
+        user: discord.abc.User,
+        guild_id: int | None,
+    ) -> str:
+        if not self.is_remote_admin(user):
+            return "Only configured admins can take control of the remote."
+
+        previous = self._remote_control_lock.active_lease()
+        self.claim_remote_ui(
+            user_id=user.id,
+            username=str(user),
+            guild_id=guild_id,
+            force=True,
+        )
+        if previous is None or previous.user_id == user.id:
+            self.logger.info("Remote control claimed by admin %s (%s)", user, user.id)
+            return "You have control of the remote."
+
+        self.logger.info(
+            "Remote control taken by admin %s (%s) from %s (%s)",
+            user,
+            user.id,
+            previous.username,
+            previous.user_id,
+        )
+        return f"Took control of the remote from {previous.username}."
+
+    def is_remote_admin(self, user: discord.abc.User) -> bool:
+        if user.id in self.config.discord_admin_user_ids:
+            return True
+
+        configured_usernames = self.config.discord_admin_usernames
+        if not configured_usernames:
+            return False
+
+        for username in _discord_usernames(user):
+            if _normalize_discord_username(username) in configured_usernames:
+                return True
+        return False
 
     def remote_control_lease_remaining_seconds(
         self, *, user_id: int | None = None
@@ -617,14 +658,10 @@ class PowerCoordinator:
 
     def remote_control_lockout_message(self) -> str | None:
         lease = self._remote_control_lock.active_lease()
-        remaining = self._remote_control_lock.remaining_seconds()
-        if lease is None or remaining is None:
+        if lease is None:
             return None
 
-        return (
-            f"{lease.username} is using the remote right now. "
-            f"Remote unlocks in {self._format_remote_lock_countdown(remaining)}."
-        )
+        return f"{lease.username} currently has the remote."
 
     def remote_control_block_reason(self, guild: discord.Guild | None) -> str | None:
         if guild is None:
@@ -744,21 +781,6 @@ class PowerCoordinator:
                 self._active_lifecycle_action,
             )
         self._active_lifecycle_action = None
-
-    def _format_remote_lock_remaining(self, seconds: int) -> str:
-        minutes, seconds = divmod(max(0, seconds), 60)
-        if minutes and seconds:
-            return f"{minutes}m {seconds}s"
-        if minutes:
-            return f"{minutes}m"
-        return f"{seconds}s"
-
-    def _format_remote_lock_countdown(self, seconds: int) -> str:
-        minutes, seconds = divmod(max(0, seconds), 60)
-        return f"{minutes:02}:{seconds:02}"
-
-    def _remote_control_unlocks_at(self, remaining_seconds: int) -> int:
-        return math.ceil(time.time() + remaining_seconds)
 
     async def _ensure_streaming(
         self, session: ActiveSession, target_channel: discord.abc.GuildChannel
@@ -956,3 +978,20 @@ def _format_checks(checks: dict[str, bool], active: ActiveSession | None) -> str
         lines.append(f"Active channel: {active.guild_name} / {active.channel_name}")
         lines.append(f"Requested by: {active.requested_by_username}")
     return "\n".join(lines)
+
+
+def _discord_usernames(user: discord.abc.User) -> set[str]:
+    names: set[str] = set()
+    for attr in ("name", "display_name", "global_name"):
+        value = getattr(user, attr, None)
+        if isinstance(value, str) and value.strip():
+            names.add(value)
+
+    as_text = str(user)
+    if as_text.strip():
+        names.add(as_text)
+    return names
+
+
+def _normalize_discord_username(value: str) -> str:
+    return value.strip().lower()

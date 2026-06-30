@@ -131,16 +131,8 @@ class AndroidTVController:
 
         self.logger.info("Android TV is off or asleep; sending %s", POWER_TOGGLE_KEY)
         await self._send_key_command(POWER_TOGGLE_KEY)
-        try:
-            await self.wait_for_power_state(True, phase="power on")
-        except AndroidTVError as exc:
-            self.logger.warning(
-                "Android TV did not confirm powered on after %s was sent: %s",
-                POWER_TOGGLE_KEY,
-                exc,
-            )
-        else:
-            self.logger.info("Android TV reported on")
+        await self.wait_for_power_state(True, phase="power on")
+        self.logger.info("Android TV reported on")
         return True
 
     async def ensure_off(self) -> bool:
@@ -151,16 +143,8 @@ class AndroidTVController:
 
         self.logger.info("Android TV is on; sending %s", POWER_OFF_KEY)
         await self._send_key_command(POWER_OFF_KEY)
-        try:
-            await self.wait_for_power_state(False, phase="power off")
-        except AndroidTVError as exc:
-            self.logger.warning(
-                "Android TV did not confirm powered off after %s was sent: %s",
-                POWER_OFF_KEY,
-                exc,
-            )
-        else:
-            self.logger.info("Android TV reported off")
+        await self.wait_for_power_state(False, phase="power off")
+        self.logger.info("Android TV reported off")
         return True
 
     async def refresh_power_cycle(self) -> None:

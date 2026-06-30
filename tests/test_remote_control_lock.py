@@ -88,6 +88,24 @@ class RemoteControlLockTests(unittest.TestCase):
         self.assertTrue(claimed.allowed)
         self.assertEqual(claimed.holder.username, "bob")
 
+    def test_force_claim_overrides_active_lock(self) -> None:
+        clock = MutableClock()
+        lock = RemoteControlLock(timeout_seconds=300, clock=clock)
+
+        self.assertTrue(lock.claim_or_refresh(user_id=1, username="alice", guild_id=10).allowed)
+        clock.advance(1)
+        claimed = lock.claim_or_refresh(
+            user_id=2,
+            username="admin",
+            guild_id=10,
+            force=True,
+        )
+
+        self.assertTrue(claimed.allowed)
+        self.assertEqual(claimed.holder.username, "admin")
+        self.assertIsNone(lock.remaining_seconds(user_id=1))
+        self.assertEqual(lock.remaining_seconds(user_id=2), 300)
+
 
 if __name__ == "__main__":
     unittest.main()

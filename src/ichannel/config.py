@@ -15,6 +15,8 @@ class AppConfig:
     discord_token: str
     stream_user_id: int
     stream_username: str
+    discord_admin_user_ids: frozenset[int]
+    discord_admin_usernames: frozenset[str]
     discord_dm_search: str
     android_tv_host: str
     android_tv_certfile: Path
@@ -58,6 +60,8 @@ def load_config(env_file: Path | str = ".env") -> AppConfig:
     if stream_user_id <= 0:
         raise ConfigError("STREAM_USER_ID must be greater than zero")
 
+    admin_user_ids, admin_usernames = _get_discord_admins(merged)
+
     certfile = _resolve_path(base_dir, _require(merged, "ANDROID_TV_CERTFILE"))
     keyfile = _resolve_path(base_dir, _require(merged, "ANDROID_TV_KEYFILE"))
     log_file = _resolve_path(base_dir, _get(merged, "LOG_FILE", str(data_dir / "ichannel.log")))
@@ -66,6 +70,8 @@ def load_config(env_file: Path | str = ".env") -> AppConfig:
         discord_token=_require(merged, "DISCORD_BOT_TOKEN"),
         stream_user_id=stream_user_id,
         stream_username=_get(merged, "STREAM_USERNAME", "the stream account"),
+        discord_admin_user_ids=admin_user_ids,
+        discord_admin_usernames=admin_usernames,
         discord_dm_search=_get(merged, "DISCORD_DM_SEARCH", "iChangeChannels"),
         android_tv_host=_require(merged, "ANDROID_TV_HOST"),
         android_tv_certfile=certfile,
@@ -209,6 +215,32 @@ def _get_optional_rect(env: dict[str, str], key: str) -> tuple[int, int, int, in
     if width <= 0 or height <= 0:
         raise ConfigError(f"{key} width and height must be positive")
     return left, top, width, height
+
+
+def _get_discord_admins(
+    env: dict[str, str],
+) -> tuple[frozenset[int], frozenset[str]]:
+    raw = env.get("DISCORD_ADMIN_USERS", "")
+    user_ids: set[int] = set()
+    usernames: set[str] = set()
+
+    for item in _split_csv(raw):
+        if item.isdecimal():
+            user_id = int(item)
+            if user_id <= 0:
+                raise ConfigError("DISCORD_ADMIN_USERS IDs must be greater than zero")
+            user_ids.add(user_id)
+            continue
+
+        normalized = _normalize_discord_username(item)
+        if normalized:
+            usernames.add(normalized)
+
+    return frozenset(user_ids), frozenset(usernames)
+
+
+def _normalize_discord_username(value: str) -> str:
+    return value.strip().lower()
 
 
 def _split_csv(value: str) -> list[str]:
